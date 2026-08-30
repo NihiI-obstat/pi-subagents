@@ -69,6 +69,7 @@ Default keys:
 - `PgUp`/`PgDn` — scroll one page
 - `x`/`Ctrl+O` — toggle tool details
 - `r` — refresh
+- `p` — open Prompt Audit for the selected foreground or async child when prompt data is available
 - `Esc` — close
 - `s` — compose an acknowledged message to a selected live async child; Tab cycles `steer`, `follow_up`, and `auto`
 - `D` — stop a selected child's top-level async run after confirmation
@@ -77,6 +78,12 @@ Default keys:
 Set `fleetKeybindings` in the extension config to replace inspector-level keys when a terminal intercepts keys such as `PgUp`, `PgDn`, `Home`, or `End`. Prompt modes keep fixed keys such as `Esc`, `Enter`, `Tab`, and stop-confirmation `Y`/`N`.
 
 `Ctrl+Alt+F` opens the same inspector even while a foreground turn is active and slash input is queued.
+
+### Prompt Audit retention
+
+Foreground Prompt Audit remains current-session memory only and disappears when the child settles. Async Prompt Audit saves the authored task, runtime additions, and final effective prompt under `<async-run>/prompt-audit/*.json` with private `0600` file permissions. Fleet can therefore show prompts for active and recent completed async runs, including workflow children, for as long as the owning async run remains in Fleet and its run directory has not been removed by retention cleanup.
+
+Saved async prompts can contain source code, user data, credentials accidentally included by an agent, or other sensitive context. They remain excluded from ordinary status, history, transcript, metadata, and public artifact surfaces, but anyone who can read the owning account's async-run directory can read the Prompt Audit files. Delete the run directory when durable prompt retention is not desired.
 
 Without a TUI, `/subagents-fleet` retains the textual `subagent({ action: "status", view: "fleet" })` fallback, and mutations use explicit commands: run `/subagents-stop` and pick from the selector, or use `/subagents-stop <run-id>` / `subagent({ action: "stop", id: "..." })` when you already know the id.
 

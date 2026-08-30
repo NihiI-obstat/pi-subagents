@@ -27,6 +27,7 @@ import { discoverAgents } from "../../src/agents/agents.ts";
 import { runSync } from "../../src/runs/foreground/execution.ts";
 import { ACTIVE_ASYNC_CAPACITY_DIR, acquireActiveAsyncCapacity, activeAsyncCapacitySessionKey } from "../../src/runs/background/active-async-capacity.ts";
 import { deriveForkPromptCacheKey, SUBAGENT_FORK_CACHE_KEY_ENV } from "../../src/runs/shared/pi-args.ts";
+import { readPersistedPromptAudits } from "../../src/runs/shared/prompt-audit-store.ts";
 
 interface LaunchResolvedExtensions {
 	version?: number;
@@ -1075,13 +1076,13 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		}
 	});
 
-	it("redacts async task text from durable artifacts, transcripts, and metadata", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+	it("redacts public async artifacts while saving a private Prompt Audit record", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
 		mockPi.onCall({ output: "async redaction complete" });
 		const id = `async-prompt-redaction-${Date.now().toString(36)}`;
 		const sentinel = "ASYNC_RAW_PROMPT_SENTINEL_1021";
 		executeAsyncSingle(id, {
 			agent: "worker",
-			task: `Handle ${sentinel} without persisting it`,
+			task: `Handle ${sentinel} while keeping public artifacts redacted`,
 			agentConfig: makeAgent("worker", { completionGuard: false }),
 			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
 			artifactConfig: { enabled: true, includeInput: true, includeOutput: true, includeJsonl: false, includeTranscript: true, includeMetadata: true, cleanupDays: 7 },
@@ -1090,6 +1091,10 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			maxSubagentDepth: 2,
 			acceptance: false,
 		});
+
+		const initialPromptAudits = readPersistedPromptAudits(path.join(ASYNC_DIR, id));
+		assert.equal(initialPromptAudits.length, 1);
+		assert.match(initialPromptAudits[0]?.authoredTask ?? "", new RegExp(sentinel));
 
 		await waitForMockPiCall(mockPi, 0);
 		const callFile = fs.readdirSync(mockPi.dir).find((name) => name.endsWith(".json"));
@@ -1111,6 +1116,10 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.match(inputText, /\[prompt redacted\]/);
 		assert.match(transcriptText, /\[prompt redacted\]/);
 		assert.equal((JSON.parse(metadataText) as { task?: string }).task, "[prompt redacted]");
+		const promptAudits = readPersistedPromptAudits(path.join(ASYNC_DIR, id));
+		assert.equal(promptAudits.length, 1);
+		assert.match(promptAudits[0]?.authoredTask ?? "", new RegExp(sentinel));
+		assert.match(promptAudits[0]?.finalEffectivePrompt ?? "", new RegExp(sentinel));
 	});
 
 	it("background writes a failure stub to output artifacts when no output was produced", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {

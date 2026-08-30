@@ -100,6 +100,7 @@ import { createOwnedProcessTreeController, type OwnedProcessTreeController } fro
 import { createSteeringStatus, recordSteeringRequest, steeringStatus, terminalSteeringNoticeState, updateSteeringTarget } from "./steering.ts";
 import { attachPostExitStdioGuard, trySignalChild } from "../../shared/post-exit-stdio-guard.ts";
 import { PROMPT_REDACTED, detectSubagentError, extractTextFromContent, extractToolArgsPreview, formatEmptyTerminalAssistantResponseError, getFinalOutput, hasEmptyTerminalAssistantResponse, readStatus } from "../../shared/utils.ts";
+import { writePersistedPromptAudit, type PersistedPromptAuditInput } from "../shared/prompt-audit-store.ts";
 import { evaluateCompletionMutationGuard, expectsImplementationMutation, hasMutationToolCapability, validateImplementationToolContract } from "../shared/completion-guard.ts";
 import { planCompletionEvidence, projectSettlementDiagnostic } from "../shared/completion-evidence.ts";
 import { planAbortRecovery } from "../shared/abort-recovery.ts";
@@ -1285,6 +1286,9 @@ interface SingleStepContext {
 	flatIndex: number;
 	flatStepCount: number;
 	outputFile: string;
+	startedAt?: number;
+	parentWorkflowRunId?: string;
+	workflowKey?: string;
 	steerInboxDir?: string;
 	steerCapabilityPath?: string;
 	steerAckDir?: string;
@@ -1453,6 +1457,31 @@ async function runSingleStepInner(
 		const acceptancePrompt = formatAcceptancePrompt(step.effectiveAcceptance, { reportOptional: isAgentContractV1(step.agentContract), structuredOutput: Boolean(step.structuredOutput?.acceptanceReportPath) });
 		if (acceptancePrompt) task = `${task}\n${acceptancePrompt}`;
 	}
+	const authoredTask = step.launchBindingTask ?? step.task;
+	const promptAuditStartedAt = ctx.startedAt ?? Date.now();
+	const persistPromptAudit = (effectivePrompt: string): void => {
+		try {
+			const promptAudit: PersistedPromptAuditInput = {
+				id: `${ctx.id}:${ctx.flatIndex}`,
+				runId: ctx.id,
+				index: ctx.flatIndex,
+				agent: step.agent,
+				authoredTask,
+				finalEffectivePrompt: effectivePrompt,
+				cwd: step.cwd ?? ctx.cwd,
+				startedAt: promptAuditStartedAt,
+			};
+			if (ctx.parentWorkflowRunId) promptAudit.parentWorkflowRunId = ctx.parentWorkflowRunId;
+			if (ctx.workflowKey) promptAudit.workflowKey = ctx.workflowKey;
+			if (step.outputPath) promptAudit.outputPath = step.outputPath;
+			if (step.model) promptAudit.model = step.model;
+			if (step.thinking) promptAudit.thinking = step.thinking;
+			writePersistedPromptAudit(path.dirname(ctx.outputFile), promptAudit);
+		} catch (error) {
+			console.warn(`[pi-subagents] Failed to persist Prompt Audit for ${ctx.id}:${ctx.flatIndex}: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	};
+	persistPromptAudit(task);
 	const sessionEnabled = Boolean(step.sessionFile) || ctx.sessionEnabled;
 	const sessionDir = step.sessionFile ? undefined : ctx.sessionDir;
 
@@ -1463,7 +1492,7 @@ async function runSingleStepInner(
 		artifactPaths = getArtifactPaths(ctx.artifactsDir, ctx.id, step.agent, index);
 		fs.mkdirSync(ctx.artifactsDir, { recursive: true });
 		if (ctx.artifactConfig?.includeInput !== false) {
-			fs.writeFileSync(artifactPaths.inputPath, `# Task for ${step.agent}\n\n${PROMPT_REDACTED}; live Prompt Audit only.\n`, "utf-8");
+			fs.writeFileSync(artifactPaths.inputPath, `# Task for ${step.agent}\n\n${PROMPT_REDACTED}; use Fleet Prompt Audit.\n`, "utf-8");
 		}
 		if (ctx.artifactConfig?.includeTranscript !== false) {
 			transcriptWriter = createChildTranscriptWriter({
@@ -1476,7 +1505,7 @@ async function runSingleStepInner(
 			});
 		}
 	}
-	transcriptWriter?.writeInitialUserMessage(`${PROMPT_REDACTED}; live Prompt Audit only.`);
+	transcriptWriter?.writeInitialUserMessage(`${PROMPT_REDACTED}; use Fleet Prompt Audit.`);
 
 	if (step.runner?.type === "external-cli") {
 		const externalCwd = step.cwd ?? ctx.cwd;
@@ -1666,6 +1695,7 @@ async function runSingleStepInner(
 		if (ctx.timeoutSignal?.aborted || ctx.stopSignal?.aborted || ctx.skipAcceptance?.()) break;
 		const recoveringAbort = abortRecoveryAttempted;
 		const attemptTask = nextAttemptTask;
+		persistPromptAudit(attemptTask);
 		const candidate = candidates[modelIndex];
 		const expectedModelForVerification = candidate && !(step.skipPrimaryModelVerification && modelIndex === 0) ? candidate : undefined;
 		try {
@@ -4210,6 +4240,9 @@ async function runSubagent(
 					artifactsDir, artifactConfig, id,
 					flatIndex: fi, flatStepCount: Math.max(statusPayload.steps.length, 1),
 					outputFile: path.join(asyncDir, `output-${fi}.log`),
+					startedAt: taskStartTime,
+					parentWorkflowRunId: config.parentWorkflowRunId,
+					workflowKey: config.workflowKey,
 					steerInboxDir: stepSteerInboxDir(asyncDir, fi),
 					steerCapabilityPath: steerCapabilityPath(asyncDir, fi),
 					steerAckDir: steerAcksDir(asyncDir, fi),
@@ -4604,6 +4637,9 @@ async function runSubagent(
 							artifactsDir, artifactConfig, id,
 							flatIndex: fi, flatStepCount: Math.max(statusPayload.steps.length, 1),
 							outputFile: path.join(asyncDir, `output-${fi}.log`),
+							startedAt: taskStartTime,
+							parentWorkflowRunId: config.parentWorkflowRunId,
+							workflowKey: config.workflowKey,
 							steerInboxDir: stepSteerInboxDir(asyncDir, fi),
 							steerCapabilityPath: steerCapabilityPath(asyncDir, fi),
 							steerAckDir: steerAcksDir(asyncDir, fi),
@@ -4964,6 +5000,9 @@ async function runSubagent(
 				artifactsDir, artifactConfig, id,
 				flatIndex, flatStepCount: Math.max(statusPayload.steps.length, 1),
 				outputFile: path.join(asyncDir, `output-${flatIndex}.log`),
+				startedAt: stepStartTime,
+				parentWorkflowRunId: config.parentWorkflowRunId,
+				workflowKey: config.workflowKey,
 				steerInboxDir: stepSteerInboxDir(asyncDir, flatIndex),
 				steerCapabilityPath: steerCapabilityPath(asyncDir, flatIndex),
 				steerAckDir: steerAcksDir(asyncDir, flatIndex),

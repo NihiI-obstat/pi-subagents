@@ -17,7 +17,7 @@ import { planChildLaunch, resolveStepBehavior, suppressProgressForReadOnlyTask, 
 import { applyThinkingSuffix, projectLaunchResolvedChildExtensions, resolvePiLaunchToolPlan } from "../shared/pi-args.ts";
 import { injectOutputPathSystemPrompt, injectSingleOutputInstruction, normalizeSingleOutputOverride, resolveSingleOutputPath, validateFileOnlyOutputMode } from "../shared/single-output.ts";
 import { buildChainInstructions, isDynamicParallelStep, isParallelStep, resolveExistingReadPaths, writeInitialProgressFile, type ChainStep, type SequentialStep, type StepOverrides } from "../../shared/settings.ts";
-import type { RunnerStep } from "../shared/parallel-utils.ts";
+import { flattenSteps, type RunnerStep } from "../shared/parallel-utils.ts";
 import type { ContextMode } from "../shared/context-mode.ts";
 import { resolvePiPackageRoot } from "../shared/pi-spawn.ts";
 import { preflightLaunchCwd } from "../shared/launch-cwd.ts";
@@ -37,6 +37,7 @@ import { ChainOutputValidationError, validateChainOutputBindings } from "../shar
 import { createStructuredOutputRuntime } from "../shared/structured-output.ts";
 import { resolveEffectiveAcceptance, validateAcceptanceInput, validateExecutionAcceptance } from "../shared/acceptance.ts";
 import { createRunFanoutBudget, writeRunFanoutBudgetDescriptor } from "../shared/run-fanout-budget.ts";
+import { writePersistedPromptAudit, type PersistedPromptAuditInput } from "../shared/prompt-audit-store.ts";
 import { validateImplementationToolContract } from "../shared/completion-guard.ts";
 import {
 	type AcceptanceInput,
@@ -942,6 +943,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			...(runFanoutPath ? { runFanoutPath } : {}),
 			agent: s.agent,
 			task,
+			launchBindingTask: s.task ?? "{previous}",
 			...(a.runner ? { runner: a.runner } : {}),
 			...(params.contextForAgent ? { context: params.contextForAgent(s.agent) } : {}),
 			...(agentContract ? { agentContract } : {}),
@@ -1264,6 +1266,29 @@ export function executeAsyncChain(
 	}
 	const initialStatusAt = Date.now();
 	const initialCompletionOwnerId = ctx.completionOwnerId ?? currentCompletionOwnerId();
+	for (const [index, step] of flattenSteps(steps).entries()) {
+		if (step.importAsyncRoot) continue;
+		try {
+			const promptAudit: PersistedPromptAuditInput = {
+				id: `${id}:${index}`,
+				runId: id,
+				index,
+				agent: step.agent,
+				authoredTask: step.launchBindingTask ?? step.task,
+				finalEffectivePrompt: step.task,
+				startedAt: initialStatusAt,
+			};
+			if (params.parentWorkflowRunId) promptAudit.parentWorkflowRunId = params.parentWorkflowRunId;
+			if (params.workflowKey) promptAudit.workflowKey = params.workflowKey;
+			if (step.cwd) promptAudit.cwd = step.cwd;
+			if (step.outputPath) promptAudit.outputPath = step.outputPath;
+			if (step.model) promptAudit.model = step.model;
+			if (step.thinking) promptAudit.thinking = step.thinking;
+			writePersistedPromptAudit(asyncDir, promptAudit);
+		} catch (error) {
+			console.warn(`[pi-subagents] Failed to persist initial Prompt Audit for ${id}:${index}: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
 
 	let spawnResult: SpawnRunnerResult = {};
 	try {
@@ -1777,6 +1802,26 @@ export function executeAsyncSingle(
 	let spawnResult: SpawnRunnerResult = {};
 	const initialStatusAt = Date.now();
 	const initialCompletionOwnerId = ctx.completionOwnerId ?? currentCompletionOwnerId();
+	try {
+		const promptAudit: PersistedPromptAuditInput = {
+			id: `${id}:0`,
+			runId: id,
+			index: 0,
+			agent,
+			authoredTask: task,
+			finalEffectivePrompt: taskText,
+			cwd: runnerCwd,
+			startedAt: initialStatusAt,
+		};
+		if (params.parentWorkflowRunId) promptAudit.parentWorkflowRunId = params.parentWorkflowRunId;
+		if (params.workflowKey) promptAudit.workflowKey = params.workflowKey;
+		if (outputPath) promptAudit.outputPath = outputPath;
+		if (model) promptAudit.model = model;
+		if (effectiveThinking) promptAudit.thinking = resolveEffectiveThinking(model, effectiveThinking);
+		writePersistedPromptAudit(asyncDir, promptAudit);
+	} catch (error) {
+		console.warn(`[pi-subagents] Failed to persist initial Prompt Audit for ${id}:0: ${error instanceof Error ? error.message : String(error)}`);
+	}
 	try {
 		spawnResult = spawnRunner(
 			{

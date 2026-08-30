@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { describe, it } from "node:test";
 import type { AgentProgress, ForegroundRunControl } from "../../src/shared/types.ts";
 import {
@@ -9,7 +12,8 @@ import {
 	settleForegroundSchedulingOwner,
 	updateForegroundChild,
 } from "../../src/runs/foreground/foreground-control.ts";
-import { getLivePromptAudit } from "../../src/runs/foreground/prompt-audit.ts";
+import { getLivePromptAudit, updateLiveEffectivePrompt } from "../../src/runs/foreground/prompt-audit.ts";
+import { readPersistedPromptAudits } from "../../src/runs/shared/prompt-audit-store.ts";
 
 function progress(index: number, agent: string, tokens: number): AgentProgress {
 	return {
@@ -104,6 +108,43 @@ describe("foreground child control", () => {
 		assert.equal(control.windowPeak, undefined);
 		assert.equal(control.interrupt, undefined);
 		assert.equal(control.detach, undefined);
+	});
+
+	it("persists workflow-owned foreground prompts in the parent async run", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-workflow-prompt-audit-"));
+		try {
+			const asyncDir = path.join(root, "workflow-parent");
+			const control: ForegroundRunControl = {
+				runId: "child-run",
+				parentWorkflowRunId: "workflow-parent",
+				workflowKey: "review",
+				workflowSteeringDir: path.join(asyncDir, "control", "workflow-foreground", "child-run"),
+				mode: "single",
+				startedAt: 1,
+				updatedAt: 1,
+				activeChildren: new Map(),
+			};
+			beginForegroundChild(control, {
+				index: 0,
+				agent: "reviewer",
+				authoredTask: "Review the implementation",
+				effectivePrompt: "Review the implementation",
+				model: "openai/gpt-test",
+				interrupt: () => true,
+			});
+			updateLiveEffectivePrompt(control, 0, "Review the implementation\n\nReturn findings only");
+			finishForegroundChild(control, 0);
+
+			const records = readPersistedPromptAudits(asyncDir);
+			assert.equal(records.length, 1);
+			assert.equal(records[0]?.runId, "child-run");
+			assert.equal(records[0]?.parentWorkflowRunId, "workflow-parent");
+			assert.equal(records[0]?.workflowKey, "review");
+			assert.equal(records[0]?.runtimeAdditions, "Return findings only");
+			assert.equal(records[0]?.finalEffectivePrompt, "Review the implementation\n\nReturn findings only");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
 	});
 
 	it("settles scheduling only after every owner releases", () => {

@@ -9,6 +9,7 @@ import { collectFleetSnapshot, openSubagentFleet, SubagentFleetComponent } from 
 import { persistForegroundRunHistory, restoreForegroundRunHistory } from "../../src/runs/foreground/foreground-history.ts";
 import { FLEET_STATUS_WIDGET_KEY } from "../../src/tui/fleet-status.ts";
 import { registerLivePromptAudit, rewritePromptWithGuidance } from "../../src/runs/foreground/prompt-audit.ts";
+import { writePersistedPromptAudit } from "../../src/runs/shared/prompt-audit-store.ts";
 import { getArtifactPaths, getArtifactsDir, getProjectArtifactsDir } from "../../src/shared/artifacts.ts";
 import type { HerdrClient } from "../../src/inspectors/herdr/client.ts";
 import type { SubagentState } from "../../src/shared/types.ts";
@@ -417,6 +418,97 @@ describe("native subagent fleet", () => {
 		}
 	});
 
+	it("opens saved Prompt Audit for completed async children and selects the roster child", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fleet-saved-prompts-"));
+		try {
+			const asyncDir = writeAsyncRun(root, { id: "saved-prompts", state: "complete", agents: ["worker", "reviewer"] });
+			writePersistedPromptAudit(asyncDir, {
+				id: "saved-prompts:0",
+				runId: "saved-prompts",
+				index: 0,
+				agent: "worker",
+				authoredTask: "FIRST_SAVED_PROMPT",
+				finalEffectivePrompt: "FIRST_SAVED_PROMPT\n\nFirst runtime addition",
+				startedAt: 100,
+			});
+			writePersistedPromptAudit(asyncDir, {
+				id: "saved-prompts:1",
+				runId: "saved-prompts",
+				index: 1,
+				agent: "reviewer",
+				authoredTask: "SECOND_SAVED_PROMPT",
+				finalEffectivePrompt: "[Read from: review.md]\n\nSECOND_SAVED_PROMPT",
+				startedAt: 101,
+			});
+			// SAFETY: These test doubles implement only the TUI and theme methods exercised by this render-only test.
+			const component = new SubagentFleetComponent(
+				{ terminal: { rows: 32, columns: 120 }, requestRender() {} } as never,
+				theme as never,
+				stateForTest(),
+				() => {},
+				{ asyncDirRoot: root, resultsDir: path.join(root, "results"), initialKey: "async:saved-prompts:1", refreshMs: 60_000, markdownTheme },
+			);
+			try {
+				assert.match(component.render(120).join("\n"), /Prompt audit: 2 saved · 3 views · p opens/);
+				component.handleInput("p");
+				let rendered = component.render(120).join("\n");
+				assert.match(rendered, /Retention: saved with async run · private file/);
+				assert.match(rendered, /SECOND_SAVED_PROMPT/);
+				assert.match(rendered, /Selected: 2\/2/);
+				component.handleInput("2");
+				assert.match(component.render(120).join("\n"), /Read from: review\.md/);
+				component.handleInput("k");
+				component.handleInput("1");
+				rendered = component.render(120).join("\n");
+				assert.match(rendered, /FIRST_SAVED_PROMPT/);
+				assert.match(rendered, /Selected: 1\/2/);
+				component.handleInput("g");
+				assert.match(component.render(120).join("\n"), /Redo is unavailable for saved async prompts/);
+			} finally {
+				component.dispose();
+			}
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("opens the sole saved child prompt from an async workflow parent", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fleet-workflow-prompt-"));
+		try {
+			const asyncDir = writeAsyncRun(root, { id: "workflow-prompt", mode: "workflow", state: "complete", agents: ["reviewer"] });
+			writePersistedPromptAudit(asyncDir, {
+				id: "workflow:child-review:0",
+				runId: "child-review",
+				parentWorkflowRunId: "workflow-prompt",
+				workflowKey: "review",
+				index: 0,
+				agent: "reviewer",
+				authoredTask: "WORKFLOW_SAVED_PROMPT",
+				finalEffectivePrompt: "WORKFLOW_SAVED_PROMPT",
+				startedAt: 100,
+			});
+			// SAFETY: These test doubles implement only the TUI and theme methods exercised by this render-only test.
+			const component = new SubagentFleetComponent(
+				{ terminal: { rows: 32, columns: 120 }, requestRender() {} } as never,
+				theme as never,
+				stateForTest(),
+				() => {},
+				{ asyncDirRoot: root, resultsDir: path.join(root, "results"), initialKey: "async:workflow-prompt", refreshMs: 60_000, markdownTheme },
+			);
+			try {
+				component.handleInput("p");
+				const rendered = component.render(120).join("\n");
+				assert.match(rendered, /WORKFLOW_SAVED_PROMPT/);
+				assert.match(rendered, /Key: review/);
+				assert.match(rendered, /Selected: 1\/1/);
+			} finally {
+				component.dispose();
+			}
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("rejects Prompt Audit for a child owned by another session", () => {
 		const state = stateForTest();
 		const control = {
@@ -439,7 +531,7 @@ describe("native subagent fleet", () => {
 		try {
 			component.handleInput("p");
 			const rendered = component.render(100).join("\n");
-			assert.match(rendered, /Prompt Audit is available only/);
+			assert.match(rendered, /No saved or live prompt audit is available/);
 			assert.doesNotMatch(rendered, /SECRET/);
 		} finally {
 			component.dispose();

@@ -1,9 +1,11 @@
+import * as path from "node:path";
 import { Agent, type StreamFn, type ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { convertToLlm, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { streamSimple } from "@earendil-works/pi-ai/compat";
 import type { Model, ProviderHeaders } from "@earendil-works/pi-ai";
 import { agentStreamOptions } from "../../shared/agent-stream-options.ts";
 import type { ForegroundRunControl } from "../../shared/types.ts";
+import { promptAuditRuntimeAdditions, writePersistedPromptAudit, type PersistedPromptAuditInput } from "../shared/prompt-audit-store.ts";
 export type PromptAuditView = "authored" | "runtime" | "effective";
 
 export interface PromptAuditRerunContract {
@@ -122,13 +124,32 @@ export async function rewritePromptWithGuidance(input: {
 	return rewritten;
 }
 
-function runtimeAdditions(authoredTask: string, effectivePrompt: string): string {
-	if (!authoredTask) return effectivePrompt;
-	const authoredIndex = effectivePrompt.indexOf(authoredTask);
-	if (authoredIndex < 0) return "(runtime additions unavailable)";
-	const before = effectivePrompt.slice(0, authoredIndex).trim();
-	const after = effectivePrompt.slice(authoredIndex + authoredTask.length).trim();
-	return [before, after].filter(Boolean).join("\n\n") || "(none)";
+function persistWorkflowPromptAudit(control: ForegroundRunControl, index: number, prompt: LivePromptAudit): void {
+	if (!control.parentWorkflowRunId || !control.workflowSteeringDir) return;
+	const child = control.activeChildren?.get(index);
+	if (!child) return;
+	const asyncDir = path.resolve(control.workflowSteeringDir, "..", "..", "..");
+	try {
+		const persisted: PersistedPromptAuditInput = {
+			id: `workflow:${control.runId}:${index}`,
+			runId: control.runId,
+			parentWorkflowRunId: control.parentWorkflowRunId,
+			index,
+			agent: child.agent,
+			authoredTask: prompt.authoredTask,
+			runtimeAdditions: prompt.runtimeAdditions,
+			finalEffectivePrompt: prompt.finalEffectivePrompt,
+			startedAt: child.startedAt,
+		};
+		if (control.workflowKey) persisted.workflowKey = control.workflowKey;
+		if (prompt.cwd) persisted.cwd = prompt.cwd;
+		if (prompt.outputPath) persisted.outputPath = prompt.outputPath;
+		if (child.model) persisted.model = child.model;
+		if (child.thinking) persisted.thinking = child.thinking;
+		writePersistedPromptAudit(asyncDir, persisted);
+	} catch (error) {
+		console.warn(`[pi-subagents] Failed to persist workflow Prompt Audit for ${control.runId}:${index}: ${error instanceof Error ? error.message : String(error)}`);
+	}
 }
 
 export function registerLivePromptAudit(
@@ -143,21 +164,24 @@ export function registerLivePromptAudit(
 		prompts = new Map();
 		livePrompts.set(control, prompts);
 	}
-	prompts.set(index, {
+	const prompt: LivePromptAudit = {
 		authoredTask,
-		runtimeAdditions: runtimeAdditions(authoredTask, effectivePrompt),
+		runtimeAdditions: promptAuditRuntimeAdditions(authoredTask, effectivePrompt),
 		finalEffectivePrompt: effectivePrompt,
 		...(metadata.cwd ? { cwd: metadata.cwd } : {}),
 		...(metadata.outputPath ? { outputPath: metadata.outputPath } : {}),
 		...(metadata.rerun ? { rerun: metadata.rerun } : {}),
-	});
+	};
+	prompts.set(index, prompt);
+	persistWorkflowPromptAudit(control, index, prompt);
 }
 
 export function updateLiveEffectivePrompt(control: ForegroundRunControl, index: number, effectivePrompt: string): void {
 	const prompt = livePrompts.get(control)?.get(index);
 	if (!prompt) return;
 	prompt.finalEffectivePrompt = effectivePrompt;
-	prompt.runtimeAdditions = runtimeAdditions(prompt.authoredTask, effectivePrompt);
+	prompt.runtimeAdditions = promptAuditRuntimeAdditions(prompt.authoredTask, effectivePrompt);
+	persistWorkflowPromptAudit(control, index, prompt);
 }
 
 export function getLivePromptAudit(control: ForegroundRunControl, index: number): LivePromptAudit | undefined {
