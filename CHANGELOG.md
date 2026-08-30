@@ -5,12 +5,17 @@
 
 ### Added
 - Persist authored, runtime-added, and final effective prompts for async children in private per-run Prompt Audit records, and expose them from Fleet while the async run remains listed.
+- Open running or retained foreground and async child transcripts in Pi-style Herdr panes with live assistant and tool updates, including workflow children.
 
 ### Changed
 - Pass the requested session and timestamp as optional context to background-work providers so they can avoid listing unrelated sessions while preserving strict snapshot validation (#1737).
 - Avoid repeating external-run display normalization during Fleet refresh while retaining validation for externally replaced or mutated records (#1736).
 - Clarify that `oracle` and top-reasoning models are escalation tools, not routine fresh-review defaults.
 - Route untargeted RPC status through restored in-memory projections when safe while preserving executor-backed targeted status and transcript options (#1735).
+
+### Fixed
+- Keep completed workflow child rows available in Fleet for transcript and Prompt Audit inspection.
+- Keep awaited Herdr client timeouts alive until their promises settle.
 
 ## [0.60.0] - 2026-08-30
 

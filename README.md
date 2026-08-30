@@ -93,7 +93,7 @@ For implementation work, the recommended loop is `clarify → scout → worker �
 
 Foreground runs stream progress in the conversation. Background runs keep working after control returns to you.
 
-In the TUI, a persistent FleetView below the editor keeps active work visible. `/subagents-fleet` opens a live inspector where you can browse children, read transcripts, inspect saved async prompts with `p`, steer a running child, or stop a run. You can also just ask: "Show me the current async runs."
+In the TUI, a persistent FleetView below the editor keeps active work visible. `/subagents-fleet` opens a live inspector where you can browse children, read transcripts, inspect saved async prompts with `p`, steer a running child, or stop a run. Inside Herdr, press `H` on a running or completed direct/workflow child to open its transcript in a separate Pi-style pane that follows live output when available. You can also just ask: "Show me the current async runs."
 
 Details, keybindings, and the machine-readable run artifacts are in [Observability](https://github.com/nicobailon/pi-subagents/blob/main/docs/observability.md).
 

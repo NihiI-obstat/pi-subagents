@@ -18,7 +18,7 @@ import { resolveWorkflowForegroundSteeringTarget, steerWorkflowForegroundTarget 
 import { contextModeBadge, contextModeLabel } from "../runs/shared/context-mode.ts";
 import { FLEET_STATUS_WIDGET_KEY } from "./fleet-status.ts";
 import { readFleetTranscript, renderFleetTranscript, type FleetTranscript } from "./fleet-transcript.ts";
-import { handleHerdrInspectorAction } from "../inspectors/herdr/actions.ts";
+import { handleHerdrInspectorAction, openHerdrTranscriptPane } from "../inspectors/herdr/actions.ts";
 import type { HerdrClient } from "../inspectors/herdr/client.ts";
 import { getLivePromptAudit, type LivePromptAudit, type PromptAuditView } from "../runs/foreground/prompt-audit.ts";
 import { readPersistedPromptAudits, type PersistedPromptAudit } from "../runs/shared/prompt-audit-store.ts";
@@ -111,10 +111,27 @@ export interface FleetActionResult {
 	isError?: boolean;
 }
 
+export type FleetInspectActionInput =
+	| { source: "async"; runId: string; asyncDir: string; index?: number }
+	| {
+		source: "transcript";
+		runId: string;
+		bindingDir: string;
+		index?: number;
+		agent: string;
+		state: string;
+		cwd: string;
+		transcriptPath?: string;
+		sessionFile?: string;
+		trustedRoots: string[];
+		trustedFiles?: string[];
+		trustedFileRoot?: string;
+	};
+
 export interface FleetActionHandlers {
 	steer(input: { runId: string; asyncDir: string; index?: number; message: string; mode: SteerDeliveryMode }): Promise<FleetActionResult>;
 	stop(input: { runId: string; asyncDir: string; index?: number }): Promise<FleetActionResult> | FleetActionResult;
-	inspect?(input: { runId: string; asyncDir: string; index?: number }): Promise<FleetActionResult>;
+	inspect?(input: FleetInspectActionInput): Promise<FleetActionResult>;
 	redoPrompt?(input: { runId: string; index: number; guidance: string; control?: ForegroundRunControl }): Promise<FleetActionResult>;
 }
 
@@ -179,12 +196,11 @@ function trackedJobSummary(job: AsyncJobState): AsyncRunSummary {
 
 function asyncItems(run: AsyncRunSummary, description?: string): FleetItem[] {
 	const updatedAt = run.lastUpdate ?? run.endedAt ?? run.startedAt;
-	if (run.steps.length === 0 || run.mode === "workflow") {
-		return [{ key: `async:${run.id}`, kind: "async", runId: run.id, agent: run.mode, state: run.state, updatedAt, run, ...(description ? { description } : {}) }];
-	}
-	return run.steps.map((step) => ({
+	const parent: FleetItem = { key: `async:${run.id}`, kind: "async", runId: run.id, agent: run.mode, state: run.state, updatedAt, run, ...(description ? { description } : {}) };
+	if (run.steps.length === 0) return [parent];
+	const children = run.steps.map((step): FleetItem => ({
 		key: `async:${run.id}:${step.index}`,
-		kind: "async" as const,
+		kind: "async",
 		runId: run.id,
 		index: step.index,
 		agent: step.label ? `${step.label} (${step.agent})` : step.agent,
@@ -194,6 +210,7 @@ function asyncItems(run: AsyncRunSummary, description?: string): FleetItem[] {
 		step,
 		...(description ? { description } : {}),
 	}));
+	return run.mode === "workflow" ? [parent, ...children] : children;
 }
 
 function asyncPromptAuditRecords(
@@ -277,25 +294,17 @@ export function collectFleetSnapshot(
 	const items: FleetItem[] = [];
 	const activeForegroundIds = new Set<string>();
 	const trackedJobs = state.fleetJobs ?? state.asyncJobs;
-	const workflowParentIds = new Set([...trackedJobs.values()]
+	const workflowParents = new Map([...trackedJobs.values()]
 		.filter((job) => job.mode === "workflow" && belongsToCurrentSession(job.sessionId, state.currentSessionId))
-		.map((job) => job.asyncId));
-	const workflowForegroundChildCounts = new Map<string, number>();
-	const liveWorkflowForegroundControls = new Set<ForegroundRunControl>();
-	for (const control of state.foregroundControls.values()) {
-		const activeChildCount = control.activeChildren?.size ?? 0;
-		if (!control.parentWorkflowRunId
-			|| !workflowParentIds.has(control.parentWorkflowRunId)
-			|| !belongsToCurrentSession(control.sessionId, state.currentSessionId)
-			|| !control.workflowSteeringDir
-			|| activeChildCount === 0) continue;
-		liveWorkflowForegroundControls.add(control);
-		workflowForegroundChildCounts.set(control.parentWorkflowRunId, (workflowForegroundChildCounts.get(control.parentWorkflowRunId) ?? 0) + activeChildCount);
-	}
+		.map((job) => [job.asyncId, job]));
 	for (const control of [...state.foregroundControls.values()].sort((left, right) => right.updatedAt - left.updatedAt)) {
 		activeForegroundIds.add(control.runId);
-		if (control.parentWorkflowRunId && workflowParentIds.has(control.parentWorkflowRunId)
-			&& ((workflowForegroundChildCounts.get(control.parentWorkflowRunId) ?? 0) <= 1 || !liveWorkflowForegroundControls.has(control))) continue;
+		const workflowParent = control.parentWorkflowRunId ? workflowParents.get(control.parentWorkflowRunId) : undefined;
+		const representedByWorkflowStep = workflowParent?.steps?.some((step) =>
+			(step.runId !== undefined && step.runId === control.runId)
+			|| (control.workflowKey !== undefined && step.workflowKey === control.workflowKey)
+		) === true;
+		if (representedByWorkflowStep && (control.activeChildren?.size ?? 1) <= 1) continue;
 		if (control.activeChildren) {
 			for (const child of [...control.activeChildren.values()].sort((left, right) => left.index - right.index)) {
 				items.push({
@@ -404,7 +413,7 @@ export function collectFleetSnapshot(
 	return { items, ...(error ? { error } : {}) };
 }
 
-function visibleWorkflowParentKeyForForegroundKey(state: SubagentState, key: string, items: FleetItem[]): string | undefined {
+function visibleWorkflowKeyForForegroundKey(state: SubagentState, key: string, items: FleetItem[]): string | undefined {
 	for (const control of state.foregroundControls.values()) {
 		if (!control.parentWorkflowRunId) continue;
 		let matches = false;
@@ -419,6 +428,13 @@ function visibleWorkflowParentKeyForForegroundKey(state: SubagentState, key: str
 			matches = `foreground-active:${control.runId}:${control.currentIndex ?? 0}` === key;
 		}
 		if (!matches) continue;
+		const parent = items.find((item): item is Extract<FleetItem, { kind: "async" }> => item.kind === "async" && item.runId === control.parentWorkflowRunId && item.index === undefined);
+		const step = parent?.run.steps.find((candidate) =>
+			(candidate.runId !== undefined && candidate.runId === control.runId)
+			|| (control.workflowKey !== undefined && candidate.workflowKey === control.workflowKey)
+		);
+		const childKey = step ? `async:${control.parentWorkflowRunId}:${step.index}` : undefined;
+		if (childKey && items.some((item) => item.key === childKey)) return childKey;
 		const parentKey = `async:${control.parentWorkflowRunId}`;
 		return items.some((item) => item.key === parentKey) ? parentKey : undefined;
 	}
@@ -944,8 +960,8 @@ export class SubagentFleetComponent implements Component {
 		this.snapshot = collectFleetSnapshot(this.state, this.options);
 		let preserved = previousKey ? this.snapshot.items.findIndex((item) => item.key === previousKey) : -1;
 		if (preserved < 0 && previousKey) {
-			const parentKey = visibleWorkflowParentKeyForForegroundKey(this.state, previousKey, this.snapshot.items);
-			if (parentKey) preserved = this.snapshot.items.findIndex((item) => item.key === parentKey);
+			const workflowKey = visibleWorkflowKeyForForegroundKey(this.state, previousKey, this.snapshot.items);
+			if (workflowKey) preserved = this.snapshot.items.findIndex((item) => item.key === workflowKey);
 		}
 		this.selected = preserved >= 0 ? preserved : Math.min(this.selected, Math.max(0, this.snapshot.items.length - 1));
 		this.selectedKey = this.snapshot.items[this.selected]?.key;
@@ -1066,18 +1082,33 @@ export class SubagentFleetComponent implements Component {
 		return { runId: target.item.runId, asyncDir: target.item.run.asyncDir, ...(target.item.index !== undefined ? { index: target.item.index } : {}) };
 	}
 
-	private selectedHerdrInspectAction(): { runId: string; asyncDir: string; index?: number } | { reason: string } {
+	private selectedHerdrInspectAction(): FleetInspectActionInput | { reason: string } {
 		const item = this.snapshot.items[this.selected];
 		if (!item) return { reason: "No child is selected." };
-		if (item.kind === "external") return { reason: "External jobs are display-only and have no Herdr controls." };
+		if (item.kind === "external") return { reason: "External jobs are display-only and have no Herdr transcript." };
 		if (item.kind === "async") {
-			if (!isActionableAsyncState(item.run.state) || !isActionableAsyncState(item.state)) return { reason: `Selected child is ${item.state}; controls require a running or queued async child.` };
-			return { runId: item.runId, asyncDir: item.run.asyncDir, ...(item.index !== undefined ? { index: item.index } : {}) };
+			if (item.run.mode === "workflow" && item.index === undefined && item.run.steps.length > 0) return { reason: "Select a workflow child row to open its transcript." };
+			return { source: "async", runId: item.runId, asyncDir: item.run.asyncDir, ...(item.index !== undefined ? { index: item.index } : {}) };
 		}
-		if (item.kind !== "foreground-active" || !item.control.parentWorkflowRunId) return { reason: "Fleet controls are available for current-session top-level async runs only." };
-		const parent = this.state.asyncJobs.get(item.control.parentWorkflowRunId) ?? this.state.fleetJobs?.get(item.control.parentWorkflowRunId);
-		if (!parent || !isActionableAsyncState(parent.status)) return { reason: "The parent workflow is no longer available for Herdr inspection." };
-		return { runId: parent.asyncId, asyncDir: parent.asyncDir };
+		const target = transcriptTarget(item, this.state);
+		const sessionFile = item.kind === "foreground-recent" ? item.child.sessionFile : undefined;
+		if (!target && !sessionFile) return { reason: "The selected child has no retained transcript or session file yet." };
+		const trustedRoots = uniquePaths([...(target?.trustedRoots ?? []), ...(this.state.trustedSessionRoots ?? [])]);
+		const cwd = item.kind === "foreground-active" ? item.control.cwd ?? this.state.baseCwd : item.run.cwd;
+		const safeRunId = item.runId.replace(/[^A-Za-z0-9._-]/g, "_");
+		return {
+			source: "transcript",
+			runId: item.runId,
+			bindingDir: path.join(this.options.resultsDir ?? DIRS.results, "herdr-transcripts", safeRunId),
+			...(item.index !== undefined ? { index: item.index } : {}),
+			agent: item.agent,
+			state: item.state,
+			cwd,
+			...(target ? { transcriptPath: target.path } : {}),
+			trustedRoots,
+			...(sessionFile ? { sessionFile, trustedFiles: [sessionFile] } : {}),
+			...(target?.trustedFileRoot ? { trustedFileRoot: target.trustedFileRoot } : this.state.trustedSessionFileRoot ? { trustedFileRoot: this.state.trustedSessionFileRoot } : {}),
+		};
 	}
 
 	private actionLines(): string[] {
@@ -1547,19 +1578,26 @@ export async function openSubagentFleet(ctx: ExtensionContext, state: SubagentSt
 			}), `Failed to steer async run ${input.runId}.`);
 		},
 		stop: (input: { runId: string; asyncDir: string; index?: number }) => firstToolResultText(stopAsyncRun(state, input.runId, undefined, { asyncDir: input.asyncDir, resolvedId: input.runId }), `Failed to stop async run ${input.runId}.`),
-		inspect: async (input: { runId: string; asyncDir: string; index?: number }) => firstToolResultText(await handleHerdrInspectorAction("inspector.open", {
-			id: input.runId,
-			dir: input.asyncDir,
-			focus: true,
-			...(input.index !== undefined ? { index: input.index } : {}),
-		}, {
-			state,
-			sessionRoots: state.trustedSessionRoots,
-			cwd: state.baseCwd,
-			...(options.herdrClient ? { client: options.herdrClient } : {}),
-			...(state.authorityPolicy ? { authorityPolicy: state.authorityPolicy } : {}),
-			...(state.missionStoreConfig ? { missions: state.missionStoreConfig } : {}),
-		}), `Failed to open Herdr inspector for async run ${input.runId}.`),
+		inspect: async (input: FleetInspectActionInput) => {
+			const deps = {
+				state,
+				sessionRoots: state.trustedSessionRoots,
+				cwd: state.baseCwd,
+				resultsDir: options.resultsDir ?? DIRS.results,
+				...(options.herdrClient ? { client: options.herdrClient } : {}),
+				...(state.authorityPolicy ? { authorityPolicy: state.authorityPolicy } : {}),
+				...(state.missionStoreConfig ? { missions: state.missionStoreConfig } : {}),
+			};
+			const result = input.source === "async"
+				? await handleHerdrInspectorAction("inspector.open", {
+					id: input.runId,
+					dir: input.asyncDir,
+					focus: true,
+					...(input.index !== undefined ? { index: input.index } : {}),
+				}, deps)
+				: await openHerdrTranscriptPane(input, deps);
+			return firstToolResultText(result, `Failed to open Herdr transcript for run ${input.runId}.`);
+		},
 		redoPrompt: async (input: { runId: string; index: number; guidance: string; control?: ForegroundRunControl }) => {
 			const control = input.control ?? state.foregroundControls.get(input.runId);
 			if (!control?.promptAuditRedo) return { text: "Redo is not available for this live child.", isError: true };

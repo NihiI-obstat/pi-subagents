@@ -25,6 +25,8 @@ export interface WorkflowPublicChild {
 	runId?: string;
 	usage?: Usage;
 	sessionFile?: string;
+	transcriptPath?: string;
+	transcriptError?: string;
 	output: string;
 	outputState: "present" | "absent";
 	structuredOutput?: unknown;
@@ -101,7 +103,7 @@ export function promoteSettledPausedWorkflow(status: AsyncStatus, now = Date.now
 
 export function applyDetachedChildSettlement(
 	status: AsyncStatus,
-	input: { childRunId: string; result: { exitCode: number | null; error?: string; interrupted?: boolean; sessionFile?: string; sessionName?: string; stopped?: boolean }; workflowKey?: string; now?: number },
+	input: { childRunId: string; result: { exitCode: number | null; error?: string; interrupted?: boolean; sessionFile?: string; sessionName?: string; transcriptPath?: string; transcriptError?: string; stopped?: boolean }; workflowKey?: string; now?: number },
 ): AsyncStatus | undefined {
 	if (status.mode !== "workflow" || status.state !== "paused") return undefined;
 	const next = cloneWorkflowStatus(status);
@@ -125,6 +127,8 @@ export function applyDetachedChildSettlement(
 	delete step.currentToolStartedAt;
 	if (input.result.sessionFile) step.sessionFile = input.result.sessionFile;
 	if (input.result.sessionName) step.sessionName = input.result.sessionName;
+	if (input.result.transcriptPath) step.transcriptPath = input.result.transcriptPath;
+	if (input.result.transcriptError) step.transcriptError = input.result.transcriptError;
 	if (succeeded) {
 		delete step.error;
 		delete step.interrupted;

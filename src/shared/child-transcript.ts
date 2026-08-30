@@ -31,7 +31,7 @@ export const CHILD_TRANSCRIPT_ARTIFACT_VERSION = 1;
 const DEFAULT_MAX_CHILD_TRANSCRIPT_BYTES = 50 * 1024 * 1024;
 
 type ChildTranscriptSource = "foreground" | "async";
-type ChildTranscriptRecordType = "message" | "tool_start" | "tool_end" | "stdout" | "stderr" | "truncated";
+type ChildTranscriptRecordType = "message" | "message_start" | "message_update" | "tool_start" | "tool_update" | "tool_end" | "stdout" | "stderr" | "truncated";
 
 type ChildTranscriptMessage = Message & {
 	model?: string;
@@ -43,9 +43,11 @@ type ChildTranscriptMessage = Message & {
 interface ChildTranscriptEvent {
 	type?: string;
 	message?: ChildTranscriptMessage;
+	assistantMessageEvent?: unknown;
 	toolCallId?: string;
 	toolName?: string;
 	args?: unknown;
+	partialResult?: unknown;
 	isError?: boolean;
 }
 
@@ -97,6 +99,25 @@ function eventArgs(event: ChildTranscriptEvent): Record<string, unknown> {
 	return event.args && typeof event.args === "object" && !Array.isArray(event.args)
 		? event.args as Record<string, unknown>
 		: {};
+}
+
+function compactAssistantMessageEvent(value: unknown): unknown {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+	const event = { ...value as Record<string, unknown> };
+	const partial = event.partial;
+	delete event.partial;
+	if ((event.type === "toolcall_start" || event.type === "toolcall_delta")
+		&& partial && typeof partial === "object" && !Array.isArray(partial)
+		&& Number.isInteger(event.contentIndex)) {
+		const content = (partial as { content?: unknown }).content;
+		const block = Array.isArray(content) ? content[event.contentIndex as number] : undefined;
+		if (block && typeof block === "object" && !Array.isArray(block)) {
+			const toolCall = block as { id?: unknown; name?: unknown };
+			if (typeof toolCall.id === "string") event.id = toolCall.id;
+			if (typeof toolCall.name === "string") event.toolName = toolCall.name;
+		}
+	}
+	return event;
 }
 
 export function createChildTranscriptWriter(input: ChildTranscriptWriterInput): ChildTranscriptWriter {
@@ -219,6 +240,23 @@ export function createChildTranscriptWriter(input: ChildTranscriptWriterInput): 
 			});
 		},
 		writeChildEvent(event: ChildTranscriptEvent) {
+			if (event.type === "message_start" && event.message?.role === "assistant") {
+				writeRecord({
+					...baseRecord("message_start"),
+					sourceEventType: event.type,
+					role: event.message.role,
+					message: event.message,
+				});
+				return;
+			}
+			if (event.type === "message_update" && event.assistantMessageEvent) {
+				writeRecord({
+					...baseRecord("message_update"),
+					sourceEventType: event.type,
+					assistantMessageEvent: compactAssistantMessageEvent(event.assistantMessageEvent),
+				});
+				return;
+			}
 			if ((event.type === "message_end" || event.type === "tool_result_end") && event.message) {
 				writeMessage(event.type, event.message);
 				return;
@@ -233,6 +271,17 @@ export function createChildTranscriptWriter(input: ChildTranscriptWriterInput): 
 					toolName: event.toolName,
 					...(Object.keys(args).length > 0 ? { argsPreview: extractToolArgsPreview(args) } : {}),
 					...(argsPayload ? { argsPayload } : {}),
+				});
+				return;
+			}
+			if (event.type === "tool_execution_update" && event.toolName) {
+				const partialPayload = boundedPayload(event.partialResult);
+				writeRecord({
+					...baseRecord("tool_update"),
+					sourceEventType: event.type,
+					...(event.toolCallId ? { toolCallId: event.toolCallId } : {}),
+					toolName: event.toolName,
+					...(partialPayload ? { partialResult: partialPayload } : {}),
 				});
 				return;
 			}

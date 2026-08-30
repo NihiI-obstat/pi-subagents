@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, it } from "node:test";
-import { handleHerdrInspectorAction, readHerdrInspectorBinding } from "../../src/inspectors/herdr/actions.ts";
+import { handleHerdrInspectorAction, openHerdrTranscriptPane, readHerdrInspectorBinding } from "../../src/inspectors/herdr/actions.ts";
 import { createHerdrClient, detectHerdr, parseHerdrVersion, supportsRawPanes, type HerdrClient } from "../../src/inspectors/herdr/client.ts";
 import { formatInspectorDashboard, submitInspectorControl } from "../../src/inspectors/herdr/inspector-runner.ts";
 import { createProjectPaneManager, handleHerdrProjectPaneAction, listHerdrProjectPaneRoots, readHerdrProjectPaneBinding, restoreHerdrProjectPaneSnapshots } from "../../src/inspectors/herdr/project-panes.ts";
@@ -115,7 +115,7 @@ describe("Herdr inspector", () => {
 				now: () => new Date("2026-01-01T00:00:00.000Z"),
 			});
 			assert.equal(opened.isError, undefined, text(opened));
-			assert.match(text(opened), /read-only Herdr inspector pane w1:p9/);
+			assert.match(text(opened), /Pi-style Herdr transcript pane w1:p9/);
 			const binding = readHerdrInspectorBinding(asyncDir);
 			assert.equal(binding?.paneId, "w1:p9");
 			assert.equal(binding?.openedAt, "2026-01-01T00:00:00.000Z");
@@ -152,6 +152,70 @@ describe("Herdr inspector", () => {
 			const focusedSplitCall = calls.find((args) => args[0] === "pane" && args[1] === "split");
 			assert.deepEqual(focusedSplitCall?.slice(-1), ["--focus"]);
 			assert.equal(readHerdrInspectorBinding(asyncDir)?.lastFocusedAt, "2026-01-01T00:00:00.000Z");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("opens retained foreground and completed async transcripts", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-herdr-retained-"));
+		try {
+			const resultsDir = path.join(root, "results");
+			const transcriptRoot = path.join(root, "artifacts");
+			const transcriptPath = path.join(transcriptRoot, "child-transcript.jsonl");
+			const bindingDir = path.join(resultsDir, "herdr-transcripts", "foreground-1");
+			fs.mkdirSync(transcriptRoot, { recursive: true });
+			fs.writeFileSync(transcriptPath, "{}\n", "utf-8");
+			const calls: string[][] = [];
+			const client: HerdrClient = {
+				run: async <T>(args: string[]) => {
+					calls.push(args);
+					if (args[0] === "--version") return { ok: true, data: "herdr 0.7.5" as T };
+					if (args[0] === "pane" && args[1] === "split") return { ok: true, data: { pane: { pane_id: "w1:p12" } } as T };
+					return { ok: true, data: {} as T };
+				},
+			};
+			const foreground = await openHerdrTranscriptPane({
+				runId: "foreground-1",
+				bindingDir,
+				index: 0,
+				agent: "reviewer",
+				cwd: path.join(root, "removed-worktree"),
+				state: "completed",
+				transcriptPath,
+				trustedRoots: [transcriptRoot],
+			}, {
+				cwd: root,
+				resultsDir,
+				client,
+				runnerPath: path.join(root, "runner.mjs"),
+				piPackageRoot: path.join(root, "pi-package"),
+			});
+			assert.equal(foreground.isError, undefined, text(foreground));
+			assert.match(text(foreground), /Pi-style Herdr transcript pane w1:p12/);
+			const foregroundRun = calls.find((args) => args[0] === "pane" && args[1] === "run")?.[3] ?? "";
+			assert.match(foregroundRun, /--lifecycle.*false/);
+			assert.match(foregroundRun, /--transcript-path/);
+			assert.match(foregroundRun, /--pi-package-root/);
+			assert.deepEqual(calls.find((args) => args[0] === "pane" && args[1] === "split")?.slice(0, -1), ["pane", "split", "--current", "--direction", "right", "--cwd", root]);
+			assert.equal(readHerdrInspectorBinding(bindingDir, 0)?.paneId, "w1:p12");
+
+			calls.length = 0;
+			const { asyncDir, status } = writeRun(root, "completed-async");
+			status.state = "complete";
+			status.steps![0]!.status = "complete";
+			status.steps![0]!.transcriptPath = transcriptPath;
+			fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify(status), "utf-8");
+			const completed = await handleHerdrInspectorAction("inspector.open", { id: "completed-async", index: 0 }, {
+				cwd: root,
+				asyncDirRoot: root,
+				resultsDir,
+				client,
+				runnerPath: path.join(root, "runner.mjs"),
+				piPackageRoot: path.join(root, "pi-package"),
+			});
+			assert.equal(completed.isError, undefined, text(completed));
+			assert.match(text(completed), /Pi-style Herdr transcript pane/);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

@@ -353,7 +353,7 @@ rows = [
 
 ### Inspector panes
 
-Herdr 0.7.5+ can open an on-demand inspector for an existing async run:
+Herdr 0.7.5+ can open an on-demand Pi-style transcript mirror for an existing async run:
 
 ```ts
 subagent({ action: "inspector.open", id: "<run-id>", index: 0, focus: true })
@@ -361,9 +361,11 @@ subagent({ action: "inspector.status", id: "<run-id>", index: 0 })
 subagent({ action: "inspector.close", id: "<run-id>", index: 0 })
 ```
 
-The inspector is a raw dashboard pane, not the child process and not a literal attach. It reads lifecycle/status/output/mission artifacts and sends `steer` or `stop` through pi-subagents' existing control inbox. Closing it never stops the run.
+The pane is not the child process and is not a literal terminal attach. It incrementally tails the retained child transcript or Pi session file and renders messages, thinking, tool calls, and tool results with Pi's native transcript components. A running child updates in real time; a completed child remains inspectable while its run artifacts are retained. Closing the pane never stops or changes the run. Scroll, search, and tool expansion are local pane controls; steer and stop remain owned by Fleet or the management actions.
 
-Herdr remains optional. Ordinary launches stay headless, and missing/older Herdr versions affect only Herdr-specific inspector and project-pane actions. FleetView opens the selected active async child with `H`. Use `focus` only with `inspector.open`; Herdr 0.7.5 cannot focus an arbitrary existing raw pane id.
+FleetView opens the selected current or recent child with `H`, including direct foreground children and async workflow children in running or terminal states. Async workflows retain child rows after settlement so the operator can select a completed child; select a child rather than the workflow parent. Runs produced by older extension versions may have only finalized message records instead of token/tool deltas, but their retained final transcript or session still renders.
+
+Herdr remains optional. Ordinary launches stay headless, and missing/older Herdr versions affect only Herdr-specific inspector and project-pane actions. Use `focus` only with `inspector.open`; Herdr 0.7.5 cannot focus an arbitrary existing raw pane id.
 
 ### Project panes
 

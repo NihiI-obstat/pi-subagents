@@ -112,6 +112,51 @@ describe("createChildTranscriptWriter", () => {
 		});
 	});
 
+	it("writes live assistant and tool update records", () => {
+		const dir = tmpDir();
+		const transcriptPath = path.join(dir, "transcript.jsonl");
+		const writer = createChildTranscriptWriter({
+			transcriptPath,
+			source: "foreground",
+			runId: "run-live",
+			agent: "worker",
+			cwd: "/repo",
+		});
+		writer.writeChildEvent({
+			type: "message_start",
+			message: { role: "assistant", content: [], model: "gpt-live" } as never,
+		});
+		writer.writeChildEvent({
+			type: "message_update",
+			assistantMessageEvent: {
+				type: "text_delta",
+				contentIndex: 0,
+				delta: "hello",
+				partial: { role: "assistant", content: [{ type: "text", text: "a growing full message" }] },
+			},
+		});
+		writer.writeChildEvent({
+			type: "message_update",
+			assistantMessageEvent: {
+				type: "toolcall_start",
+				contentIndex: 1,
+				partial: { role: "assistant", content: [{ type: "text", text: "hello" }, { type: "toolCall", id: "call-live", name: "bash", arguments: {} }] },
+			},
+		});
+		writer.writeChildEvent({
+			type: "tool_execution_update",
+			toolCallId: "call-live",
+			toolName: "bash",
+			partialResult: { content: [{ type: "text", text: "working" }] },
+		});
+
+		const records = readRecords(transcriptPath);
+		assert.deepEqual(records.map((record) => record.recordType), ["message_start", "message_update", "message_update", "tool_update"]);
+		assert.deepEqual(records[1]!.assistantMessageEvent, { type: "text_delta", contentIndex: 0, delta: "hello" });
+		assert.deepEqual(records[2]!.assistantMessageEvent, { type: "toolcall_start", contentIndex: 1, id: "call-live", toolName: "bash" });
+		assert.match(String(records[3]!.partialResult), /working/);
+	});
+
 	it("writes tool_start and tool_end records and ignores unhandled event types", () => {
 		const dir = tmpDir();
 		const transcriptPath = path.join(dir, "transcript.jsonl");

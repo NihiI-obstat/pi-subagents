@@ -4,7 +4,7 @@ import * as path from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { discoverAgents, findBlockingAgentDiagnostic, formatUnknownAgentError, resolveAgentName, unknownAgentDiagnosticContext, type AgentConfig, type AgentDiscoveryDiagnostic, type AgentScope, type UnknownAgentDiagnosticContext } from "../../agents/agents.ts";
-import { getArtifactsDir, getProjectArtifactPackagingWarning, getProjectSubagentsDir } from "../../shared/artifacts.ts";
+import { getArtifactPaths, getArtifactsDir, getProjectArtifactPackagingWarning, getProjectSubagentsDir } from "../../shared/artifacts.ts";
 import { writeAtomicJson } from "../../shared/atomic-json.ts";
 import { createCapacityResilientJsonWriter } from "../../shared/capacity-resilient-json.ts";
 import { isStorageCapacityError } from "../../shared/file-system-retry.ts";
@@ -3929,7 +3929,7 @@ function duplicateSubagentCallResult(params: SubagentParamsLike): AgentToolResul
 	};
 }
 
-const workflowLaunchObservers = new WeakMap<object, (launch: { agent: string; sessionName?: string; sessionFile?: string; async: boolean; runId?: string }) => void>();
+const workflowLaunchObservers = new WeakMap<object, (launch: { agent: string; sessionName?: string; sessionFile?: string; transcriptPath?: string; async: boolean; runId?: string }) => void>();
 
 /**
  * Terminal-mission retention can remove a mission while its children still
@@ -4089,13 +4089,17 @@ function workflowChildResult(
 	};
 }
 
-function workflowChildAccountingFields(child: WorkflowScriptChildResult): { usage?: Usage; sessionFile?: string } {
+function workflowChildAccountingFields(child: WorkflowScriptChildResult): { usage?: Usage; sessionFile?: string; transcriptPath?: string; transcriptError?: string } {
 	if (!child.results?.length) return {};
 	const usage = sumResultsUsage(child.results);
 	const sessionFile = child.results.find((result) => result.sessionFile)?.sessionFile;
+	const transcriptPath = child.results.find((result) => result.transcriptPath)?.transcriptPath;
+	const transcriptError = child.results.find((result) => result.transcriptError)?.transcriptError;
 	return {
 		...(usage.input !== 0 || usage.output !== 0 || usage.cacheRead !== 0 || usage.cacheWrite !== 0 || usage.cost !== 0 || usage.turns !== 0 ? { usage } : {}),
 		...(sessionFile ? { sessionFile } : {}),
+		...(transcriptPath ? { transcriptPath } : {}),
+		...(transcriptError ? { transcriptError } : {}),
 	};
 }
 
@@ -5130,6 +5134,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 											step.agent = launch.agent;
 											if (launch.sessionName) step.sessionName = launch.sessionName;
 											step.sessionFile = launch.sessionFile;
+											step.transcriptPath = launch.transcriptPath;
 											step.async = launch.async;
 											if (launch.runId) step.runId = launch.runId;
 											if (childRequest.lane) step.lane = childRequest.lane;
@@ -5172,9 +5177,13 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 								if (child.runId) workflowChildRunIds.set(key, child.runId);
 								const step = status.steps?.find((candidate) => candidate.workflowKey === key);
 								if (step) {
+									const completedChild = result.details.results[0];
 									step.async = Boolean(result.details.asyncId || result.details.asyncDir);
 									if (child.runId) step.runId = child.runId;
 									if (child.lane) step.lane = child.lane;
+									if (completedChild?.sessionFile) step.sessionFile = completedChild.sessionFile;
+									if (completedChild?.transcriptPath) step.transcriptPath = completedChild.transcriptPath;
+									if (completedChild?.transcriptError) step.transcriptError = completedChild.transcriptError;
 								}
 								if (result.details.asyncDir && missionBinding) writeMissionAsyncBinding(result.details.asyncDir, missionBinding);
 								const childStatus = missionWorkflowChildStatus(result);
@@ -6660,10 +6669,15 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 					: singleTask
 						? deriveChildSessionName({ agent: singleTask.agent, task: singleTask.task })
 						: undefined;
+				const launchAgent = hasSingle ? effectiveParams.agent! : singleTask?.agent;
+				const launchRunId = effectiveAsync ? asyncRunId : runId;
+				const launchTranscriptPath = launchAgent && artifactConfig.enabled && artifactConfig.includeTranscript !== false
+					? getArtifactPaths(artifactsDir, launchRunId, launchAgent, effectiveAsync ? undefined : 0).transcriptPath
+					: undefined;
 				const launch = hasSingle
-					? { agent: effectiveParams.agent!, ...(singleSessionName ? { sessionName: singleSessionName } : {}), sessionFile: childSessionFileForTask(effectiveParams.agent!, 0, effectiveParams.model), async: effectiveAsync, runId: effectiveAsync ? asyncRunId : runId }
+					? { agent: effectiveParams.agent!, ...(singleSessionName ? { sessionName: singleSessionName } : {}), sessionFile: childSessionFileForTask(effectiveParams.agent!, 0, effectiveParams.model), ...(launchTranscriptPath ? { transcriptPath: launchTranscriptPath } : {}), async: effectiveAsync, runId: launchRunId }
 					: singleTask
-						? { agent: singleTask.agent, ...(singleSessionName ? { sessionName: singleSessionName } : {}), sessionFile: childSessionFileForTask(singleTask.agent, 0, singleTask.model), async: effectiveAsync, runId: effectiveAsync ? asyncRunId : runId }
+						? { agent: singleTask.agent, ...(singleSessionName ? { sessionName: singleSessionName } : {}), sessionFile: childSessionFileForTask(singleTask.agent, 0, singleTask.model), ...(launchTranscriptPath ? { transcriptPath: launchTranscriptPath } : {}), async: effectiveAsync, runId: launchRunId }
 						: undefined;
 				if (launch) {
 					workflowLaunchObservers.delete(params);

@@ -1026,7 +1026,12 @@ describe("below-editor subagent FleetView", () => {
 		state.fleetJobs!.set("workflow-1", workflowJob);
 
 		assert.deepEqual(collectFleetStatusEntries(state).map((entry) => entry.key), ["async:workflow-1"]);
-		assert.deepEqual(collectFleetSnapshot(state).items.map((item) => item.key), ["async:workflow-1"]);
+		assert.deepEqual(collectFleetSnapshot(state).items.map((item) => item.key), [
+			"async:workflow-1",
+			"async:workflow-1:0",
+			"async:workflow-1:1",
+			"async:workflow-1:2",
+		]);
 
 		let widgetFactory: ((tui: unknown, theme: typeof theme) => { render(width: number): string[] }) | undefined;
 		const ctx = {

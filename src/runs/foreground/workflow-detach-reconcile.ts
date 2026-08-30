@@ -32,7 +32,7 @@ import {
 
 export function applyDetachedChildToPausedWorkflow(
 	status: AsyncStatus,
-	input: { childRunId: string; result: Pick<SingleResult, "exitCode" | "error" | "interrupted" | "sessionFile" | "sessionName" | "stopped">; workflowKey?: string },
+	input: { childRunId: string; result: Pick<SingleResult, "exitCode" | "error" | "interrupted" | "sessionFile" | "sessionName" | "transcriptPath" | "transcriptError" | "stopped">; workflowKey?: string },
 ): AsyncStatus | undefined {
 	return applyDetachedChildSettlement(status, input);
 }
@@ -72,6 +72,8 @@ function workflowResultChildren(status: AsyncStatus, childRunId: string, result:
 				...(terminalOutcome ? { terminalOutcome } : {}),
 				...(result.sessionName ? { sessionName: result.sessionName } : {}),
 				...(result.sessionFile ? { sessionFile: result.sessionFile } : {}),
+				...(result.transcriptPath ? { transcriptPath: result.transcriptPath } : {}),
+				...(result.transcriptError ? { transcriptError: result.transcriptError } : {}),
 				...(result.error ? { error: result.error } : {}),
 			};
 		});
@@ -84,7 +86,12 @@ function workflowResultChildren(status: AsyncStatus, childRunId: string, result:
 		success: step.status === "completed" || step.status === "complete",
 		output: step.runId === childRunId ? output : "",
 		outputState: step.runId === childRunId && output.trim() ? "present" : "absent",
-		...(step.runId === childRunId ? { ...(usage ? { usage } : {}), ...(result.sessionFile ? { sessionFile: result.sessionFile } : {}) } : {}),
+		...(step.runId === childRunId ? {
+			...(usage ? { usage } : {}),
+			...(result.sessionFile ? { sessionFile: result.sessionFile } : {}),
+			...(result.transcriptPath ? { transcriptPath: result.transcriptPath } : {}),
+			...(result.transcriptError ? { transcriptError: result.transcriptError } : {}),
+		} : {}),
 		...(step.runId === childRunId && outputReference ? { outputReference } : step.workflowKey && receipt?.entries[step.workflowKey]?.outputReference ? { outputReference: receipt.entries[step.workflowKey]!.outputReference } : {}),
 		...(step.runId === childRunId && outputPathMapping ? { outputPathMapping } : step.outputPathMapping ? { outputPathMapping: step.outputPathMapping } : {}),
 		...(step.interrupted ? { interrupted: true } : {}),

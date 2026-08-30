@@ -30,7 +30,7 @@ describe("applyDetachedChildToPausedWorkflow", () => {
 	it("fails closed when a detached child succeeds without persisted workflow continuation", () => {
 		const next = applyDetachedChildToPausedWorkflow(pausedWorkflow("child-1"), {
 			childRunId: "child-1",
-			result: { exitCode: 0, sessionFile: "/tmp/child.jsonl" },
+			result: { exitCode: 0, sessionFile: "/tmp/child.jsonl", transcriptPath: "/tmp/child-transcript.jsonl" },
 		});
 		assert.equal(next?.state, "failed");
 		assert.equal(next?.activityState, undefined);
@@ -38,6 +38,7 @@ describe("applyDetachedChildToPausedWorkflow", () => {
 		assert.equal(next?.steps?.[0]?.status, "completed");
 		assert.equal(next?.steps?.[0]?.activityState, undefined);
 		assert.equal(next?.steps?.[0]?.sessionFile, "/tmp/child.jsonl");
+		assert.equal(next?.steps?.[0]?.transcriptPath, "/tmp/child-transcript.jsonl");
 	});
 
 	it("fails a paused workflow when its detached child fails", () => {

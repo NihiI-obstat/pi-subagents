@@ -56,7 +56,7 @@ After you expand it:
 
 When the focused editor is empty, press `↓` or `←` to expand the summary into `main` plus active children with agent name, state, elapsed time, and token usage. When providers report usage, `window` is the latest assistant turn's input plus cache-read tokens, while `spent` keeps the cumulative input-plus-output total. Old run artifacts without window data keep the existing token-total label. The compact line counts active current-session work and Herdr project panes. Then use `↑`/`↓` or `j`/`k` to select a child and `Enter` to inspect it. Printable navigation keys are never intercepted before activation.
 
-FleetView replaces the legacy above-editor async widget by default. Successful background completions stay quiet so inactive Pi tabs are not marked unread, while failed or paused completions still notify the originating session. Parallel runs show every active child independently. Chains with parallel groups keep their grouped shape in progress and results, so failed or paused agents stay visible next to completed ones. When a child is explicitly allowed to fan out with `tools: subagent` or `allowNestedSubagents: true`, its nested runs appear under that parent child in the main status tree instead of being hidden inside the child process.
+FleetView replaces the legacy above-editor async widget by default. Successful background completions stay quiet so inactive Pi tabs are not marked unread, while failed or paused completions still notify the originating session. Parallel runs show every active child independently. Async workflows keep their parent and child rows after settlement for as long as the run remains in recent Fleet history, so completed workflow children remain selectable and inspectable. Chains with parallel groups keep their grouped shape in progress and results, so failed or paused agents stay visible next to completed ones. When a child is explicitly allowed to fan out with `tools: subagent` or `allowNestedSubagents: true`, its nested runs appear under that parent child in the main status tree instead of being hidden inside the child process.
 
 ## The fleet inspector
 
@@ -73,7 +73,7 @@ Default keys:
 - `Esc` — close
 - `s` — compose an acknowledged message to a selected live async child; Tab cycles `steer`, `follow_up`, and `auto`
 - `D` — stop a selected child's top-level async run after confirmation
-- `H` — open the selected active async child in a Herdr inspector pane (Herdr 0.7.5+)
+- `H` — open the selected current or recent child in a Pi-style Herdr transcript pane, including running or completed direct and workflow children (Herdr 0.7.5+)
 
 Set `fleetKeybindings` in the extension config to replace inspector-level keys when a terminal intercepts keys such as `PgUp`, `PgDn`, `Home`, or `End`. Prompt modes keep fixed keys such as `Esc`, `Enter`, `Tab`, and stop-confirmation `Y`/`N`.
 
@@ -84,6 +84,12 @@ Set `fleetKeybindings` in the extension config to replace inspector-level keys w
 Foreground Prompt Audit remains current-session memory only and disappears when the child settles. Async Prompt Audit saves the authored task, runtime additions, and final effective prompt under `<async-run>/prompt-audit/*.json` with private `0600` file permissions. Fleet can therefore show prompts for active and recent completed async runs, including workflow children, for as long as the owning async run remains in Fleet and its run directory has not been removed by retention cleanup.
 
 Saved async prompts can contain source code, user data, credentials accidentally included by an agent, or other sensitive context. They remain excluded from ordinary status, history, transcript, metadata, and public artifact surfaces, but anyone who can read the owning account's async-run directory can read the Prompt Audit files. Delete the run directory when durable prompt retention is not desired.
+
+### Herdr transcript panes
+
+Pressing `H` opens a separate Herdr pane that incrementally follows the selected child's retained transcript or Pi session file. It uses Pi's native user-message, assistant-message, thinking, and tool-execution components rather than Fleet's compact Markdown projection. Scroll, search, and tool expansion work inside the pane; close it with `q`, `Esc`, or `Ctrl+C`. The pane is a read-only mirror, not the child process, so closing it does not stop the run and steering/stopping remains in Fleet.
+
+The same action works for foreground and async children, while running or completed, including settled workflow children. Availability follows Fleet and artifact retention: once a run and its transcript/session artifacts are cleaned up, there is nothing left to mirror. Runs launched by older extension versions may lack live token/tool-update records and therefore show only finalized messages while they are running; retained final messages still render after completion.
 
 Without a TUI, `/subagents-fleet` retains the textual `subagent({ action: "status", view: "fleet" })` fallback, and mutations use explicit commands: run `/subagents-stop` and pick from the selector, or use `/subagents-stop <run-id>` / `subagent({ action: "stop", id: "..." })` when you already know the id.
 

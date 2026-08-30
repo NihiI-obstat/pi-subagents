@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { describe, it } from "node:test";
 import { visibleWidth, type MarkdownTheme } from "@earendil-works/pi-tui";
 import { EXTERNAL_RUN_REGISTRY_KEY, EXTERNAL_RUN_REGISTRY_VERSION, registerExternalRun } from "../../src/api/external-runs.ts";
-import { collectFleetSnapshot, openSubagentFleet, SubagentFleetComponent } from "../../src/tui/fleet.ts";
+import { collectFleetSnapshot, openSubagentFleet, SubagentFleetComponent, type FleetInspectActionInput } from "../../src/tui/fleet.ts";
 import { persistForegroundRunHistory, restoreForegroundRunHistory } from "../../src/runs/foreground/foreground-history.ts";
 import { FLEET_STATUS_WIDGET_KEY } from "../../src/tui/fleet-status.ts";
 import { registerLivePromptAudit, rewritePromptWithGuidance } from "../../src/runs/foreground/prompt-audit.ts";
@@ -231,7 +231,7 @@ describe("native subagent fleet", () => {
 			assert.match(initial, /Transcript path: \/outside\/trusted\/roots\/transcript\.jsonl/);
 			assert.doesNotMatch(initial, /Herdr ·|steer ·|stop ·/);
 			component.handleInput("H");
-			assert.match(component.render(120).join("\n"), /display-only and have no Herdr controls/);
+			assert.match(component.render(120).join("\n"), /display-only and have no Herdr transcript/);
 			component.handleInput("s");
 			assert.match(component.render(120).join("\n"), /display-only and remain controlled/);
 			component.handleInput("D");
@@ -556,7 +556,7 @@ describe("native subagent fleet", () => {
 			}]]);
 
 			const snapshot = collectFleetSnapshot(state, { asyncDirRoot: root, resultsDir: path.join(root, "results") });
-			assert.deepEqual(snapshot.items.map((item) => item.runId), ["active-workflow", "newer-complete", "older-failed"]);
+			assert.deepEqual(snapshot.items.map((item) => item.runId), ["active-workflow", "active-workflow", "newer-complete", "older-failed"]);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
@@ -608,7 +608,7 @@ describe("native subagent fleet", () => {
 		}
 	});
 
-	it("shows a scripted workflow as one fleet parent instead of unrelated children", () => {
+	it("keeps a scripted workflow parent and exposes durable child rows", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fleet-workflow-parent-"));
 		try {
 			const state = stateForTest();
@@ -643,8 +643,10 @@ describe("native subagent fleet", () => {
 			}]]);
 
 			const snapshot = collectFleetSnapshot(state);
-			assert.deepEqual(snapshot.items.map((item) => item.key), ["async:workflow-1"]);
+			assert.deepEqual(snapshot.items.map((item) => item.key), ["async:workflow-1", "async:workflow-1:0", "async:workflow-1:1"]);
 			assert.equal(snapshot.items[0]?.agent, "workflow");
+			assert.equal(snapshot.items[1]?.state, "completed");
+			assert.equal(snapshot.items[2]?.state, "running");
 
 			const component = new SubagentFleetComponent(
 				{ terminal: { rows: 28, columns: 100 }, requestRender() {} } as never,
@@ -666,7 +668,7 @@ describe("native subagent fleet", () => {
 		}
 	});
 
-	it("shows selectable workflow children only when multiple are live", async () => {
+	it("uses live workflow child rows while durable status catches up", async () => {
 		const state = stateForTest();
 		state.asyncJobs.set("workflow-1", {
 			asyncId: "workflow-1",
@@ -697,7 +699,11 @@ describe("native subagent fleet", () => {
 			updatedAt: 20,
 			activeChildren: new Map([[0, { index: 0, agent: "reviewer", startedAt: 10, updatedAt: 20 }]]),
 		});
-		assert.deepEqual(collectFleetSnapshot(state).items.map((item) => item.key), ["async:unrelated", "async:workflow-1"]);
+		assert.deepEqual(collectFleetSnapshot(state).items.map((item) => item.key), [
+			"foreground-active:child-1:0",
+			"async:unrelated",
+			"async:workflow-1",
+		]);
 		state.foregroundControls.get("child-1")!.activeChildren!.set(1, { index: 1, agent: "writer", startedAt: 11, updatedAt: 21 });
 		assert.deepEqual(collectFleetSnapshot(state).items.map((item) => item.key), [
 			"foreground-active:child-1:0",
@@ -725,7 +731,7 @@ describe("native subagent fleet", () => {
 			"async:workflow-1",
 		]);
 		const steerCalls: Array<{ runId: string; asyncDir: string; index?: number; message: string; mode: string }> = [];
-		const inspectCalls: Array<{ runId: string; asyncDir: string; index?: number }> = [];
+		const inspectCalls: FleetInspectActionInput[] = [];
 		const component = new SubagentFleetComponent(
 			{ terminal: { rows: 28, columns: 100 }, requestRender() {} } as never,
 			theme as never,
@@ -750,7 +756,14 @@ describe("native subagent fleet", () => {
 			assert.deepEqual(steerCalls, [{ runId: "child-1", asyncDir: "/tmp/workflow-1", index: 0, message: "check the failure", mode: "steer" }]);
 			component.handleInput("H");
 			await new Promise((resolve) => setImmediate(resolve));
-			assert.deepEqual(inspectCalls, [{ runId: "workflow-1", asyncDir: "/tmp/workflow-1" }]);
+			assert.equal(inspectCalls.length, 1);
+			assert.equal(inspectCalls[0]?.source, "transcript");
+			if (inspectCalls[0]?.source === "transcript") {
+				assert.equal(inspectCalls[0].runId, "child-1");
+				assert.equal(inspectCalls[0].index, 0);
+				assert.equal(inspectCalls[0].agent, "reviewer");
+				assert.match(inspectCalls[0].transcriptPath ?? "", /child-1_reviewer_0_transcript\.jsonl$/);
+			}
 		} finally {
 			component.dispose();
 		}
@@ -1679,7 +1692,7 @@ describe("native subagent fleet", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fleet-herdr-"));
 		try {
 			const asyncDir = writeAsyncRun(root, { id: "async-herdr" });
-			const calls: Array<{ runId: string; asyncDir: string; index?: number }> = [];
+			const calls: FleetInspectActionInput[] = [];
 			const component = new SubagentFleetComponent(
 				{ terminal: { rows: 28, columns: 100 }, requestRender() {} } as never,
 				theme as never,
@@ -1699,11 +1712,86 @@ describe("native subagent fleet", () => {
 			try {
 				component.handleInput("H");
 				await new Promise((resolve) => setImmediate(resolve));
-				assert.deepEqual(calls, [{ runId: "async-herdr", asyncDir, index: 0 }]);
+				assert.deepEqual(calls, [{ source: "async", runId: "async-herdr", asyncDir, index: 0 }]);
 				assert.ok(component.render(100).some((line) => line.includes("Inspector opened.")));
 			} finally {
 				component.dispose();
 			}
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("opens completed workflow and foreground child transcripts", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fleet-herdr-retained-"));
+		try {
+			const resultsDir = path.join(root, "results");
+			const workflowDir = path.join(root, "workflow-complete");
+			const foregroundTranscript = path.join(root, "artifacts", "foreground.jsonl");
+			fs.mkdirSync(path.dirname(foregroundTranscript), { recursive: true });
+			fs.writeFileSync(foregroundTranscript, "{}\n", "utf-8");
+			const state = stateForTest();
+			state.baseCwd = root;
+			state.asyncJobs.set("workflow-complete", {
+				asyncId: "workflow-complete",
+				asyncDir: workflowDir,
+				sessionId: "session-current",
+				status: "complete",
+				mode: "workflow",
+				startedAt: 100,
+				updatedAt: 200,
+				steps: [{ agent: "reviewer", index: 0, workflowKey: "review", status: "completed", transcriptPath: foregroundTranscript }],
+			});
+			state.foregroundRuns!.set("foreground-complete", {
+				runId: "foreground-complete",
+				mode: "single",
+				cwd: root,
+				sessionId: "session-current",
+				updatedAt: 300,
+				children: [{ agent: "worker", index: 0, status: "completed", transcriptPath: foregroundTranscript }],
+			});
+			state.foregroundControls.set("foreground-live", {
+				runId: "foreground-live",
+				mode: "single",
+				cwd: root,
+				sessionId: "session-current",
+				startedAt: 250,
+				updatedAt: 350,
+				currentAgent: "scout",
+				currentIndex: 0,
+			});
+			const calls: FleetInspectActionInput[] = [];
+			const open = async (initialKey: string) => {
+				const component = new SubagentFleetComponent(
+					{ terminal: { rows: 28, columns: 100 }, requestRender() {} } as never,
+					theme as never,
+					state,
+					() => {},
+					{
+						initialKey,
+						resultsDir,
+						refreshMs: 60_000,
+						actions: {
+							async steer() { return { text: "unused" }; },
+							stop() { return { text: "unused" }; },
+							async inspect(input) { calls.push(input); return { text: "opened" }; },
+						},
+					},
+				);
+				try {
+					component.handleInput("H");
+					await new Promise((resolve) => setImmediate(resolve));
+				} finally { component.dispose(); }
+			};
+			await open("async:workflow-complete:0");
+			await open("foreground-recent:foreground-complete:0");
+			await open("foreground-active:foreground-live:0");
+			assert.equal(calls[0]?.source, "async");
+			assert.equal(calls[0]?.runId, "workflow-complete");
+			assert.equal(calls[1]?.source, "transcript");
+			assert.equal(calls[1]?.runId, "foreground-complete");
+			assert.equal(calls[2]?.source, "transcript");
+			assert.equal(calls[2]?.runId, "foreground-live");
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

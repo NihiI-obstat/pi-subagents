@@ -7,10 +7,12 @@ import { listMissions, missionRecordPath, resolveMissionStoreLocation } from "..
 import type { MissionStoreConfig } from "../../missions/types.ts";
 import { resolveAuthorityDecision, type AuthorityPolicyConfig } from "../../policy/authority.ts";
 import { writeAtomicJson } from "../../shared/atomic-json.ts";
-import { DIRS, type Details, type SubagentState } from "../../shared/types.ts";
+import { getArtifactsDir } from "../../shared/artifacts.ts";
+import { DIRS, type AsyncStatus, type Details, type SubagentState } from "../../shared/types.ts";
 import { readStatus } from "../../shared/utils.ts";
 import { resolveSubagentRunId } from "../../runs/background/run-id-resolver.ts";
 import { resolveNodeExecutable } from "../../shared/node-executable.ts";
+import { resolvePiPackageRoot } from "../../runs/shared/pi-spawn.ts";
 import { createHerdrClient, detectHerdr, type HerdrClient, type HerdrErrorCode, type HerdrResult } from "./client.ts";
 import { encodeSessionRoots } from "./session-roots-codec.ts";
 import { formatShellCommand } from "./shell-command.ts";
@@ -53,6 +55,7 @@ interface InspectorDeps {
 	signal?: AbortSignal;
 	now?: () => Date;
 	runnerPath?: string;
+	piPackageRoot?: string;
 }
 
 function result(text: string, isError = false): AgentToolResult<Details> {
@@ -88,10 +91,37 @@ function extractPaneId(value: unknown): string | undefined {
 	return undefined;
 }
 
-function inspectorCommand(input: { runnerPath: string; asyncDir: string; runId: string; index?: number; missionPath?: string; allowSteer: boolean; allowStop: boolean; sessionRoots: string[] }): string {
+function inspectorCommand(input: {
+	runnerPath: string;
+	asyncDir: string;
+	runId: string;
+	index?: number;
+	missionPath?: string;
+	allowSteer: boolean;
+	allowStop: boolean;
+	sessionRoots: string[];
+	transcriptRoots?: string[];
+	trustedFiles?: string[];
+	trustedFileRoot?: string;
+	transcriptPath?: string;
+	sessionFile?: string;
+	cwd?: string;
+	agent?: string;
+	lifecycle?: boolean;
+	piPackageRoot?: string;
+}): string {
 	const args = [input.runnerPath, "--async-dir", input.asyncDir, "--run-id", input.runId, "--allow-steer", String(input.allowSteer), "--allow-stop", String(input.allowStop), "--session-roots", encodeSessionRoots(input.sessionRoots)];
+	if (input.transcriptRoots?.length) args.push("--transcript-roots", encodeSessionRoots(input.transcriptRoots));
+	if (input.trustedFiles?.length) args.push("--trusted-files", encodeSessionRoots(input.trustedFiles));
+	if (input.trustedFileRoot) args.push("--trusted-file-root", input.trustedFileRoot);
 	if (input.index !== undefined) args.push("--index", String(input.index));
 	if (input.missionPath) args.push("--mission-path", input.missionPath);
+	if (input.transcriptPath) args.push("--transcript-path", input.transcriptPath);
+	if (input.sessionFile) args.push("--session-file", input.sessionFile);
+	if (input.cwd) args.push("--cwd", input.cwd);
+	if (input.agent) args.push("--agent", input.agent);
+	if (input.lifecycle === false) args.push("--lifecycle", "false");
+	if (input.piPackageRoot) args.push("--pi-package-root", input.piPackageRoot);
 	return formatShellCommand(resolveNodeExecutable(), args);
 }
 
@@ -113,10 +143,31 @@ function pathWithin(base: string, candidate: string): boolean {
 	return resolvedCandidate === resolvedBase || resolvedCandidate.startsWith(`${resolvedBase}${path.sep}`);
 }
 
+function availablePaneCwd(preferred: string | undefined, fallback: string): string {
+	for (const candidate of [preferred, fallback]) {
+		if (!candidate) continue;
+		try {
+			if (fs.statSync(candidate).isDirectory()) return path.resolve(candidate);
+		} catch {
+			// Completed managed worktrees may already be removed; use the owner cwd.
+		}
+	}
+	return path.resolve(fallback);
+}
+
 function herdrSessionRoots(target: { runId: string }, deps: InspectorDeps): string[] {
 	const roots = deps.sessionRoots ?? deps.state?.trustedSessionRoots ?? [];
 	const job = deps.state?.asyncJobs.get(target.runId) ?? deps.state?.fleetJobs?.get(target.runId);
 	return [...new Set([...roots, ...(job?.sessionRoot ? [job.sessionRoot] : [])])];
+}
+
+function herdrTranscriptRoots(target: { runId: string; asyncDir: string }, status: AsyncStatus, deps: InspectorDeps): string[] {
+	const job = deps.state?.asyncJobs.get(target.runId) ?? deps.state?.fleetJobs?.get(target.runId);
+	const cwd = job?.cwd ?? status.cwd ?? deps.cwd;
+	return [...new Set([
+		path.resolve(target.asyncDir),
+		...(deps.state ? [getArtifactsDir(deps.state.parentSessionFile ?? null, cwd, deps.state.artifactDirPreference)] : []),
+	])];
 }
 
 function isTrustedAsyncDir(asyncDir: string, deps: InspectorDeps): boolean {
@@ -160,6 +211,20 @@ async function paneExists(client: HerdrClient, paneId: string, signal?: AbortSig
 	return client.run(["pane", "get", paneId], { timeoutMs: 5_000, signal });
 }
 
+export interface HerdrTranscriptPaneTarget {
+	runId: string;
+	bindingDir: string;
+	index?: number;
+	agent: string;
+	cwd: string;
+	state: string;
+	transcriptPath?: string;
+	sessionFile?: string;
+	trustedRoots: string[];
+	trustedFiles?: string[];
+	trustedFileRoot?: string;
+}
+
 export async function handleHerdrInspectorAction(action: HerdrInspectorAction, params: InspectorParams, deps: InspectorDeps): Promise<AgentToolResult<Details>> {
 	const target = resolveAsyncTarget(params, deps);
 	if ("error" in target) return result(target.error, true);
@@ -193,7 +258,8 @@ export async function handleHerdrInspectorAction(action: HerdrInspectorAction, p
 		const live = await paneExists(client, existing.paneId, deps.signal);
 		if (live.ok) return result(`Herdr inspector pane ${existing.paneId} is already open for async run ${target.runId}.${params.focus ? " Herdr cannot refocus an arbitrary raw pane id; select it in the Herdr UI." : ""}`);
 	}
-	const splitArgs = ["pane", "split", "--current", "--direction", "right", "--cwd", status.cwd ?? deps.cwd];
+	const paneCwd = availablePaneCwd(status.cwd, deps.cwd);
+	const splitArgs = ["pane", "split", "--current", "--direction", "right", "--cwd", paneCwd];
 	splitArgs.push(params.focus === true ? "--focus" : "--no-focus");
 	const split = await client.run(splitArgs, { timeoutMs: 15_000, signal: deps.signal });
 	if (split.ok === false) return result(formatHerdrError(split.error), true);
@@ -201,6 +267,9 @@ export async function handleHerdrInspectorAction(action: HerdrInspectorAction, p
 	if (!paneId) return result("Herdr inspector error (PANE_GONE): pane split returned no pane id.", true);
 	const mission = missionForRun(target.asyncDir, deps.cwd, deps.missions, target.runId);
 	const runnerPath = deps.runnerPath ?? fileURLToPath(new URL("../../../inspector-runner.mjs", import.meta.url));
+	const step = params.index !== undefined
+		? status.steps?.[params.index]
+		: status.steps?.length === 1 ? status.steps[0] : undefined;
 	const command = inspectorCommand({
 		runnerPath,
 		asyncDir: target.asyncDir,
@@ -210,6 +279,14 @@ export async function handleHerdrInspectorAction(action: HerdrInspectorAction, p
 		allowSteer: resolveAuthorityDecision({ action: "steerRun", policy: deps.authorityPolicy }) === "auto",
 		allowStop: resolveAuthorityDecision({ action: "stopRun", policy: deps.authorityPolicy }) === "auto",
 		sessionRoots: herdrSessionRoots(target, deps),
+		transcriptRoots: herdrTranscriptRoots(target, status, deps),
+		...(step?.transcriptPath ? { transcriptPath: step.transcriptPath } : {}),
+		...(step?.sessionFile ? { sessionFile: step.sessionFile } : status.sessionFile ? { sessionFile: status.sessionFile } : {}),
+		cwd: paneCwd,
+		agent: step?.agent ?? (params.index === undefined ? status.mode : undefined),
+		...(deps.state?.trustedSessionFileRoot ? { trustedFileRoot: deps.state.trustedSessionFileRoot } : {}),
+		...(step?.sessionFile ? { trustedFiles: [step.sessionFile] } : status.sessionFile ? { trustedFiles: [status.sessionFile] } : {}),
+		piPackageRoot: deps.piPackageRoot ?? resolvePiPackageRoot(),
 	});
 	const started = await client.run(["pane", "run", paneId, command], { timeoutMs: 15_000, signal: deps.signal });
 	if (started.ok === false) {
@@ -231,5 +308,66 @@ export async function handleHerdrInspectorAction(action: HerdrInspectorAction, p
 		command,
 	};
 	writeAtomicJson(bindingPath(target.asyncDir, params.index), binding);
-	return result(`Opened read-only Herdr inspector pane ${paneId} for async run ${target.runId}. Closing the pane does not stop the run.\nControls inside the pane: steer <message>, stop, status.`);
+	return result(`Opened Pi-style Herdr transcript pane ${paneId} for async run ${target.runId}. Closing the pane does not stop the run.\nPane controls: scroll, search, expand tools, or close; run controls remain in Fleet.`);
+}
+
+export async function openHerdrTranscriptPane(target: HerdrTranscriptPaneTarget, deps: InspectorDeps): Promise<AgentToolResult<Details>> {
+	if (!target.runId.trim()) return result("Herdr transcript pane requires a run id.", true);
+	const resultsRoot = path.resolve(deps.resultsDir ?? DIRS.results);
+	const bindingDir = path.resolve(target.bindingDir);
+	if (!pathWithin(resultsRoot, bindingDir)) return result(`Herdr transcript binding directory '${bindingDir}' is outside trusted result roots.`, true);
+	fs.mkdirSync(bindingDir, { recursive: true });
+	const existing = readHerdrInspectorBinding(bindingDir, target.index);
+	const client = deps.client ?? createHerdrClient();
+	const detected = await detectHerdr(client, deps.signal);
+	if (detected.ok === false) return result(formatHerdrError(detected.error), true);
+	if (existing) {
+		const live = await paneExists(client, existing.paneId, deps.signal);
+		if (live.ok) return result(`Herdr transcript pane ${existing.paneId} is already open for ${target.agent}.`);
+	}
+	const paneCwd = availablePaneCwd(target.cwd, deps.cwd);
+	const splitArgs = ["pane", "split", "--current", "--direction", "right", "--cwd", paneCwd, "--focus"];
+	const split = await client.run(splitArgs, { timeoutMs: 15_000, signal: deps.signal });
+	if (split.ok === false) return result(formatHerdrError(split.error), true);
+	const paneId = extractPaneId(split.data);
+	if (!paneId) return result("Herdr inspector error (PANE_GONE): pane split returned no pane id.", true);
+	const runnerPath = deps.runnerPath ?? fileURLToPath(new URL("../../../inspector-runner.mjs", import.meta.url));
+	const command = inspectorCommand({
+		runnerPath,
+		asyncDir: bindingDir,
+		runId: target.runId,
+		index: target.index,
+		allowSteer: false,
+		allowStop: false,
+		sessionRoots: [],
+		transcriptRoots: target.trustedRoots,
+		trustedFiles: target.trustedFiles,
+		trustedFileRoot: target.trustedFileRoot,
+		transcriptPath: target.transcriptPath,
+		sessionFile: target.sessionFile,
+		cwd: paneCwd,
+		agent: target.agent,
+		lifecycle: false,
+		piPackageRoot: deps.piPackageRoot ?? resolvePiPackageRoot(),
+	});
+	const started = await client.run(["pane", "run", paneId, command], { timeoutMs: 15_000, signal: deps.signal });
+	if (started.ok === false) {
+		await client.run(["pane", "close", paneId], { timeoutMs: 5_000 });
+		return result(formatHerdrError(started.error), true);
+	}
+	const now = (deps.now?.() ?? new Date()).toISOString();
+	const binding: HerdrInspectorBinding = {
+		schemaVersion: 1,
+		kind: "herdr-inspector",
+		runId: target.runId,
+		asyncDir: bindingDir,
+		...(target.index !== undefined ? { childIndex: target.index } : {}),
+		paneId,
+		openedAt: now,
+		lastFocusedAt: now,
+		herdrVersion: detected.data.versionText,
+		command,
+	};
+	writeAtomicJson(bindingPath(bindingDir, target.index), binding);
+	return result(`Opened Pi-style Herdr transcript pane ${paneId} for ${target.agent} (${target.state}). Closing the pane does not stop or alter the run.`);
 }
