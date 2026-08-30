@@ -14,6 +14,7 @@
 - Route untargeted RPC status through restored in-memory projections when safe while preserving executor-backed targeted status and transcript options (#1735).
 
 ### Fixed
+- Deliver Fleet stop actions directly to live in-process workflows, and preserve child-scoped stops when a workflow child row is selected.
 - Keep completed workflow child rows available in Fleet for transcript and Prompt Audit inspection.
 - Keep awaited Herdr client timeouts alive until their promises settle.
 

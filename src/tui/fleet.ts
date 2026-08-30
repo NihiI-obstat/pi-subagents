@@ -15,6 +15,7 @@ import { steerAsyncRun } from "../runs/foreground/async-steering-action.ts";
 import type { SteerDeliveryMode } from "../runs/background/control-channel.ts";
 import { stopAsyncRun } from "../runs/foreground/async-stop-action.ts";
 import { resolveWorkflowForegroundSteeringTarget, steerWorkflowForegroundTarget } from "../runs/foreground/workflow-foreground-steering.ts";
+import { asyncStatusChildIdentity } from "../runs/shared/child-identity.ts";
 import { contextModeBadge, contextModeLabel } from "../runs/shared/context-mode.ts";
 import { FLEET_STATUS_WIDGET_KEY } from "./fleet-status.ts";
 import { readFleetTranscript, renderFleetTranscript, type FleetTranscript } from "./fleet-transcript.ts";
@@ -1577,7 +1578,15 @@ export async function openSubagentFleet(ctx: ExtensionContext, state: SubagentSt
 				location: { asyncDir: input.asyncDir, resolvedId: input.runId } as Parameters<typeof steerAsyncRun>[0]["location"],
 			}), `Failed to steer async run ${input.runId}.`);
 		},
-		stop: (input: { runId: string; asyncDir: string; index?: number }) => firstToolResultText(stopAsyncRun(state, input.runId, undefined, { asyncDir: input.asyncDir, resolvedId: input.runId }), `Failed to stop async run ${input.runId}.`),
+		stop: (input: { runId: string; asyncDir: string; index?: number }) => {
+			let childId: string | undefined;
+			if (input.index !== undefined) {
+				const step = readStatus(input.asyncDir)?.steps?.[input.index];
+				if (!step) return { text: `Child at index ${input.index} was not found in async run ${input.runId}.`, isError: true };
+				childId = asyncStatusChildIdentity(step, input.index);
+			}
+			return firstToolResultText(stopAsyncRun(state, input.runId, undefined, { asyncDir: input.asyncDir, resolvedId: input.runId }, childId), `Failed to stop async run ${input.runId}.`);
+		},
 		inspect: async (input: FleetInspectActionInput) => {
 			const deps = {
 				state,

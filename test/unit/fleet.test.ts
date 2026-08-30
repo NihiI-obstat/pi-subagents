@@ -1841,6 +1841,83 @@ describe("native subagent fleet", () => {
 		}
 	});
 
+	it("stops a live in-process workflow from the Fleet parent row", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fleet-stop-live-workflow-"));
+		try {
+			const runId = "workflow-stop-live";
+			writeAsyncRun(root, { id: runId, mode: "workflow", agents: ["worker"] });
+			const state = stateForTest();
+			const controller = new AbortController();
+			state.workflowControllers = new Map([[runId, controller]]);
+			let rendered = "";
+			const ctx = {
+				hasUI: true,
+				ui: {
+					setWidget() {},
+					async custom(factory: (tui: unknown, theme: unknown, keybindings: unknown, done: (result: undefined) => void) => SubagentFleetComponent) {
+						const component = factory({ terminal: { rows: 32, columns: 100 }, requestRender() {} }, theme, undefined, () => {});
+						try {
+							component.handleInput("D");
+							component.handleInput("y");
+							for (let attempt = 0; attempt < 100; attempt++) {
+								await new Promise((resolve) => setImmediate(resolve));
+								rendered = component.render(100).join("\n");
+								if (controller.signal.aborted && rendered.includes(`Stop requested for async workflow ${runId}`)) break;
+							}
+						} finally {
+							component.dispose();
+						}
+					},
+				},
+			};
+
+			await openSubagentFleet(ctx as never, state, { initialKey: `async:${runId}`, asyncDirRoot: root, resultsDir: path.join(root, "results"), refreshMs: 60_000 });
+			assert.equal(controller.signal.aborted, true);
+			assert.equal(controller.signal.reason instanceof Error ? controller.signal.reason.message : String(controller.signal.reason), "Workflow stopped.");
+			assert.match(rendered, new RegExp(`Stop requested for async workflow ${runId}`));
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("stops only the selected live workflow child from Fleet", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fleet-stop-live-child-"));
+		try {
+			const runId = "workflow-stop-child";
+			writeAsyncRun(root, { id: runId, mode: "workflow", agents: ["worker", "reviewer"] });
+			const state = stateForTest();
+			const controller = new AbortController();
+			const stopped: string[] = [];
+			state.workflowControllers = new Map([[runId, controller]]);
+			state.workflowChildStops = new Map([[runId, (childId) => {
+				stopped.push(childId);
+				return true;
+			}]]);
+			const ctx = {
+				hasUI: true,
+				ui: {
+					setWidget() {},
+					async custom(factory: (tui: unknown, theme: unknown, keybindings: unknown, done: (result: undefined) => void) => SubagentFleetComponent) {
+						const component = factory({ terminal: { rows: 32, columns: 100 }, requestRender() {} }, theme, undefined, () => {});
+						try {
+							component.handleInput("D");
+							component.handleInput("y");
+							for (let attempt = 0; attempt < 100 && stopped.length === 0; attempt++) await new Promise((resolve) => setImmediate(resolve));
+						} finally {
+							component.dispose();
+						}
+					},
+				},
+			};
+
+			await openSubagentFleet(ctx as never, state, { initialKey: `async:${runId}:0`, asyncDirRoot: root, resultsDir: path.join(root, "results"), refreshMs: 60_000 });
+			assert.deepEqual(stopped, ["step:0"]);
+			assert.equal(controller.signal.aborted, false);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("explains unavailable controls for completed async children", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fleet-unavailable-"));
 		try {
